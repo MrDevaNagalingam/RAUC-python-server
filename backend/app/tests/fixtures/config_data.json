@@ -1,0 +1,5 @@
+{
+  "time": "20261016T104324",
+  "status": {"result": {"finished": "success"}, "execution": "closed"},
+  "data": {"model": "T1", "mac_address": "ff:ff:ff:ff:ff:ff", "hw_revision": "2"}
+}

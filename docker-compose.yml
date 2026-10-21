@@ -1,0 +1,26 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    env_file:
+      - backend/.env
+    environment:
+      DATABASE_URL: ${OTA_CONTAINER_DATABASE_URL:-sqlite:////data/ota.db}
+      ARTIFACT_STORAGE_PATH: /data/artifacts
+      FRONTEND_PATH: /app/frontend
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8081}:8080"
+    volumes:
+      - ota-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request, urllib.parse; req = urllib.request.Request('http://127.0.0.1:8080/ready', headers={'Host': urllib.parse.urlsplit(os.environ['PUBLIC_BASE_URL']).netloc}); urllib.request.urlopen(req, timeout=5)"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+volumes:
+  ota-data:
