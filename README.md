@@ -16,85 +16,230 @@ checking the intended target, bundle trust/compatibility/version and recovery pa
 Download Only skips installation. Boot confirmation remains `UNKNOWN` without
 separate evidence. No real installation or reboot has been performed by this work.
 
-## Upgrade the existing polling-only instance
+## New PC: clone, configure and run
 
-Stop its Uvicorn process with **Ctrl+C** before upgrading. Do not recreate the
-existing target or rotate its working token merely to upgrade the server.
+These commands are for **Linux or WSL2 with Bash**. You need Git, Python **3.11**
+with venv/pip support, and Node.js **22+** with npm. Check prerequisites first:
 
 ```bash
-cd /media/phytec/data/work/python-server
+git --version
+python3.11 --version
+python3.11 -m venv --help
+node --version
+npm --version
+```
+
+If a prerequisite is missing, install it before continuing. Docker Engine can
+replace the local Node.js build step below; the Docker Compose alternative is in
+[the deployment guide](docs/deployment-guide.md).
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/MrDevaNagalingam/RAUC-python-server.git
+cd RAUC-python-server
+```
+
+The clone directory is `RAUC-python-server`; it does not have to match the original
+PC's `python-server` directory. All following paths are relative to this checkout.
+
+### 2. Create the Python environment
+
+Run from the repository root:
+
+```bash
+python3.11 -m venv .venv
 .venv/bin/pip install -r backend/requirements.lock
 .venv/bin/pip install --no-deps -e backend
-cd backend
-../.venv/bin/python ../scripts/backup-sqlite.py
-../.venv/bin/alembic upgrade head
-../.venv/bin/ota admin-create admin
 ```
 
-Choose a private password at the prompt (minimum 12 characters). No default
-administrator/password is seeded. The backup uses SQLite's online backup API and
-writes a private file under the storage directory. For PostgreSQL, use your normal
-`pg_dump`/backup procedure instead. Keep backups and the database private.
+### 3. Create the local configuration
 
-The dashboard production build is already present in this workspace. To reproduce
-it after source changes, use either local Node.js 22+:
+Still from the repository root:
 
 ```bash
-# From the repository root
-cd frontend
-npm ci
-npm run build
+cp backend/.env.example backend/.env
+nano backend/.env
 ```
 
-Or build using Docker when Node.js is unavailable on the host:
+Use any text editor if `nano` is not installed.
 
-```bash
-# From the repository root; use your actual absolute checkout path
- docker run --rm --user "$(id -u):$(id -g)" \
-   -v "$PWD/frontend:/app" -w /app node:22-alpine sh -c 'npm ci && npm run build'
+For access only from this new PC, the example defaults work:
+
+```dotenv
+PUBLIC_BASE_URL=http://127.0.0.1:8081
+ALLOWED_HOSTS=["localhost","127.0.0.1","testserver"]
 ```
 
-From `backend/`, edit the private `.env` with the host's reachable origin and
-matching `ALLOWED_HOSTS`. Keep the same public port already used by the gateway:
+For access from the PHYTEC gateway or another PC, replace `YOUR_HOST_IP` below
+with this **new PC's actual reachable IP address** (use `hostname -I` on Linux to
+inspect addresses). Save real values in `.env`, not the literal placeholder:
 
 ```dotenv
 PUBLIC_BASE_URL=http://YOUR_HOST_IP:8081
 ALLOWED_HOSTS=["localhost","127.0.0.1","YOUR_HOST_IP"]
 ```
 
-Then start the host server:
+Do not copy the old PC's address unless the new PC actually uses it. Ensure the
+chosen port is free and reachable through the host/network firewall. Settings
+persist in `.env`; you do not need to prefix every launch command with them.
+These HTTP instructions are for controlled development/lab use. Production needs
+PostgreSQL and trusted HTTPS; see [deployment](docs/deployment-guide.md).
+
+### 4. Build the dashboard
+
+`frontend/dist` and `frontend/node_modules` are deliberately excluded from Git.
+A fresh clone must build them. From the repository root:
+
+```bash
+cd frontend
+npm ci
+npm run build
+cd ..
+```
+
+**Alternative when Node.js is absent:** replace the preceding block with this
+Docker command, also run from the repository root:
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v "$PWD/frontend:/app" -w /app node:22-alpine \
+  sh -c 'npm ci && npm run build'
+```
+
+### 5. Initialize the database and administrator
+
+From the repository root, enter `backend/`:
+
+```bash
+cd backend
+../.venv/bin/alembic upgrade head
+../.venv/bin/ota admin-create admin
+```
+
+Choose a private password at the prompt (minimum 12 characters). There is no
+default administrator or password. On a fresh installation the database starts
+empty: users, targets, firmware and history from the old PC are **not** in Git.
+Do not run the backup helper on a fresh installation with no existing database.
+
+### 6. Start the server
+
+**Stay in `backend/`** and run:
 
 ```bash
 ../.venv/bin/uvicorn app.main:create_app --factory \
   --host 0.0.0.0 --port 8081 --no-proxy-headers --no-access-log
 ```
 
-Open `http://YOUR_HOST_IP:8081/` and sign in with the administrator you created.
-The existing target continues polling the same DDI address and credential.
-`--host 127.0.0.1` permits access only from the host itself. Relative database,
-storage and frontend paths resolve from `backend/`; consistently run server/CLI
-commands there. If the root page says the build is missing, build `frontend/` and
-restart Uvicorn so the assets mount is registered.
+Keep the terminal running. Open `http://127.0.0.1:8081/` on this PC, or
+`http://YOUR_HOST_IP:8081/` from the lab network after configuring its origin/hosts.
+Sign in with the administrator just created. `/docs` is the API explorer.
+The dashboard initially has no targets or firmware; that is expected.
 
-## Fresh development setup
-
-Python **3.11+** is required; the host's default `python3` may be older.
+From another terminal, check:
 
 ```bash
-python3.11 -m venv .venv
+curl --fail http://127.0.0.1:8081/health
+curl --fail http://127.0.0.1:8081/ready
+```
+
+Expected responses: `{"status":"ok","stage":"management"}` and
+`{"status":"ready"}`. On later launches, run only the server command from
+`backend/`; repeat migrations after schema upgrades, and rebuild the dashboard
+when frontend source changes. Do not recreate the administrator each time.
+
+### 7. Enroll a target
+
+Use **Targets → Add target** in the dashboard and save the one-time credential
+privately. Configure the existing target updater with this server's reachable
+`HOST_IP:8081`, the same tenant/controller ID, and that credential. Keep the target's
+RAUC service, trust/keyring, Barebox, partitions and updater executable unchanged.
+For the controlled HTTP lab set `ssl=false`, `ssl_verify=false` and keep
+`post_update_reboot=false`. Full hardware procedures are in
+[hardware testing](docs/hardware-testing.md).
+
+Enroll manually instead if desired (from `backend/`):
+
+```bash
+../.venv/bin/ota target-create gateway-001 --token-file /tmp/gateway-001.token
+```
+
+The token file must not already exist. A new target starts as `Never Connected`;
+it becomes `Online` after authenticated updater activity. Creating a target or
+uploading firmware never assigns a deployment.
+
+## Move existing server data to another PC
+
+Choose this path when you want the old users, target credentials, firmware and
+history, rather than a new empty installation. Git contains application code only.
+Privately back up/transfer the database and artifact storage together, and configure
+the new PC's `.env` for the restored paths and new public address. Do not commit
+these files. Use [the backup and deployment instructions](docs/deployment-guide.md)
+and keep the source server stopped while taking a consistent migration copy.
+
+For the default SQLite layout, restore the DB as `backend/ota.db` and retain the
+content-addressed artifact files under `backend/storage/artifacts/`. If you used
+custom paths, configure those restored paths instead. Use a proper SQLite backup,
+not an arbitrary copy of a live `ota.db` that may depend on WAL files. Apply
+`alembic upgrade head` to the restored DB, then sign in with an existing account;
+**skip `admin-create admin` when that account already exists**. Existing device
+credentials remain valid when the full DB is preserved, but the updater must reach
+the new server address. For PostgreSQL use your normal dump/restore procedure.
+
+## Upgrade an existing installation
+
+Stop its Uvicorn process with **Ctrl+C**. From your actual checkout root:
+
+```bash
 .venv/bin/pip install -r backend/requirements.lock
 .venv/bin/pip install --no-deps -e backend
 cd backend
-cp .env.example .env
+../.venv/bin/python ../scripts/backup-sqlite.py
 ../.venv/bin/alembic upgrade head
-../.venv/bin/ota admin-create admin
 ```
 
-Build the frontend and start Uvicorn as above. Enroll devices through the dashboard
-or `ota target-create CONTROLLER_ID --token-file /PRIVATE/NEW_FILE.token`. Tokens
-are shown only on creation/rotation, never in normal list responses. Preserve the
-existing updater's configuration and signature trust. The formerly exposed test
-token mentioned in the master prompt must not be reused.
+The backup helper writes a private SQLite backup including WAL contents. For
+PostgreSQL, use your normal backup procedure instead. Create an administrator only
+if upgrading an old polling-only installation that has none. Preserve the private
+`.env`, existing database and target credentials; do not recopy `.env.example`
+over your configured file or recreate working targets. Build the frontend as in
+step 4, return to `backend/`, and restart with the command in step 6.
+
+## Files intentionally excluded from Git
+
+| Local item | New PC action |
+|---|---|
+| `.venv/` | Recreate and install the locked Python dependencies |
+| `frontend/node_modules/` | Run `npm ci` |
+| `frontend/dist/` | Run `npm run build` |
+| `backend/.env` | Copy `.env.example` and configure the new host |
+| Database, WAL and backups | Initialize a fresh DB or privately restore existing data |
+| `storage/` | Upload firmware again or privately restore its artifact files |
+| `*.token` | Provision securely; never commit device tokens |
+
+All source, migrations, `.env.example` and dependency lock files are tracked.
+Ignoring local files does not delete them from the original PC. Native Windows
+commands use different paths; use WSL2 for the Bash procedure above.
+
+## Common startup problems
+
+| Symptom | Check/fix |
+|---|---|
+| Database schema is not current | Run `alembic upgrade head` from **backend/** against the intended DB |
+| It fails after launching from frontend/ | Stop it; `cd` to backend/ before migrations, CLI or Uvicorn |
+| Dashboard build missing | Build frontend/, then restart Uvicorn so assets mount correctly |
+| Port already in use | Stop the intended old instance or choose a free port; update public URL and target configuration consistently |
+| Localhost works, LAN IP is refused | Bind with `--host 0.0.0.0`; check interface address, routing and firewall |
+| Invalid host header | Add the actual hostname/IP (without port) to ALLOWED_HOSTS and restart |
+| Fresh dashboard has no old targets/users | Expected: Git does not include server data; enroll new devices or restore a private backup |
+
+## Setup verification
+
+Fresh-setup verification: the procedure was checked on Linux using an isolated
+checkout containing only Git-tracked files, a new Python 3.11 environment and the
+Node.js 22 Docker build alternative. Migrations, administrator bootstrap/login,
+HTTP health/readiness, dashboard HTML/assets and an empty fresh database passed.
+No existing `.env`, database, firmware storage or compiled build was reused.
 
 ## Release workflow
 
@@ -121,7 +266,7 @@ retry or device reboot is performed.
 # From backend/
 curl --fail http://127.0.0.1:8081/health
 curl --fail http://127.0.0.1:8081/ready
-../.venv/bin/ota target-show test-target
+../.venv/bin/ota target-list
 ../.venv/bin/pytest -q
 ../.venv/bin/ruff check .
 ../.venv/bin/alembic check
