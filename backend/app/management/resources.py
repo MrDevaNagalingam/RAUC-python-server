@@ -1,7 +1,7 @@
 import re
 
 from fastapi import APIRouter, HTTPException, Request
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from starlette.concurrency import run_in_threadpool
 from starlette.formparsers import MultiPartException, MultiPartParser
 
@@ -36,6 +36,7 @@ from app.management.schemas import (
     RetryRequest,
     TargetCreate,
     TargetPatch,
+    TargetPurge,
     UserPatch,
 )
 from app.services.deployment_engine import assign, event
@@ -101,6 +102,23 @@ def targets(request: Request, ctx: CurrentUser, include_deleted: bool = False):
 
 @router.post("/targets", status_code=201)
 def create_target(request: Request, payload: TargetCreate, ctx: Admin):
+    existing = ctx.session.scalar(
+        select(Target)
+        .join(Tenant)
+        .where(
+            Tenant.tenant_code == payload.tenant,
+            Target.controller_id == payload.controller_id,
+        )
+    )
+    if existing:
+        detail = (
+            'Enable "Show deleted targets" and click Restore on the existing target.'
+            if existing.deleted_at is not None
+            else "Manage the existing target or use a different controller ID for a new device."
+        )
+        raise HTTPException(
+            409, f"Target {payload.tenant}/{payload.controller_id} already exists. {detail}"
+        )
     try:
         target, token = provision(
             ctx.session,
@@ -184,6 +202,40 @@ def restore_target(request: Request, target_id: int, ctx: Admin):
     return target_view(request, ctx.session, target)
 
 
+@router.delete("/targets/{target_id}/permanent", status_code=204)
+def purge_target(target_id: int, payload: TargetPurge, ctx: Admin):
+    target = get(ctx.session, Target, target_id, lock=True)
+    if target.deleted_at is None:
+        raise HTTPException(409, "Delete the target before deleting it permanently")
+    if payload.controller_id_confirmation != target.controller_id:
+        raise HTTPException(400, "Type the exact controller ID to confirm permanent deletion")
+    if ctx.session.scalar(
+        select(Deployment.id).where(Deployment.target_id == target.id, Deployment.active.is_(True))
+    ):
+        raise HTTPException(409, "Target has an active deployment")
+    deployments = select(Deployment.id).where(Deployment.target_id == target.id)
+    ctx.session.execute(
+        delete(DeploymentEvent).where(DeploymentEvent.deployment_id.in_(deployments))
+    )
+    # Clear retry links before removing the target's deployment history.
+    ctx.session.execute(
+        update(Deployment).where(Deployment.target_id == target.id).values(retry_of=None)
+    )
+    ctx.session.execute(delete(Deployment).where(Deployment.target_id == target.id))
+    record(
+        ctx.session,
+        ctx.user,
+        "target.permanently_deleted",
+        "target",
+        target.id,
+        tenant_id=target.tenant_id,
+        controller_id=target.controller_id,
+        name=target.name,
+    )
+    # Attributes and credentials are removed by their ON DELETE CASCADE constraints.
+    ctx.session.delete(target)
+
+
 @router.get("/targets/{target_id}/history")
 def target_history(target_id: int, ctx: CurrentUser):
     get(ctx.session, Target, target_id)
@@ -259,8 +311,13 @@ async def upload(request: Request, ctx: Writer):
             select(FirmwareArtifact).where(FirmwareArtifact.sha256 == info["sha256"])
         )
         if existing:
+            detail = (
+                "It is withdrawn. Close this dialog and click Restore on the Firmware page."
+                if not existing.available
+                else "Use the existing firmware on the Firmware page."
+            )
             raise HTTPException(
-                409, f"Identical artifact already exists as firmware #{existing.id}"
+                409, f"Identical artifact already exists as firmware #{existing.id}. {detail}"
             )
         artifact = FirmwareArtifact(
             **metadata.model_dump(), **info, filename=file.filename, uploaded_by=ctx.user.id
@@ -293,6 +350,15 @@ def withdraw(artifact_id: int, ctx: Writer):
     artifact.available = False
     # Tombstone only: historical action references remain intact, no unlink/download race.
     record(ctx.session, ctx.user, "firmware.withdrawn", "firmware", artifact.id)
+
+
+@router.post("/firmware/{artifact_id}/restore")
+def restore_firmware(artifact_id: int, ctx: Writer):
+    artifact = get(ctx.session, FirmwareArtifact, artifact_id, lock=True)
+    if not artifact.available:
+        artifact.available = True
+        record(ctx.session, ctx.user, "firmware.restored", "firmware", artifact.id)
+    return row(artifact, ("storage_key",))
 
 
 @router.get("/software-modules")

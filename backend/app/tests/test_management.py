@@ -224,6 +224,68 @@ def test_upload_limits_clean_partial_file(client, admin, app):
     assert client.get("/api/firmware").json() == []
 
 
+def test_withdrawn_firmware_can_be_restored_without_reupload(client, admin, release, device):
+    url = f"/api/firmware/{release['artifact']['id']}"
+    artifact = client.get(url).json()
+    assert client.delete(url, headers=admin).status_code == 204
+    duplicate = client.post(
+        "/api/firmware/upload",
+        headers=admin,
+        data={"name": "Renamed", "version": "2", "compatible": "board"},
+        files={"file": ("renamed.raucb", BUNDLE, "application/octet-stream")},
+    )
+    assert duplicate.status_code == 409
+    assert "withdrawn" in duplicate.json()["detail"]
+    assert "Restore" in duplicate.json()["detail"]
+    payload = assignment(device, release)
+    assert client.post("/api/deployments", headers=admin, json=payload).status_code == 409
+    assert client.post(url + "/restore").status_code == 403
+    restored = client.post(url + "/restore", headers=admin)
+    assert restored.status_code == 200
+    assert restored.json() == artifact
+    assert client.post(url + "/restore", headers=admin).json() == artifact
+    assert len(client.get("/api/firmware").json()) == 1
+    assert client.get("/api/deployments").json() == []
+    audits = client.get("/api/audit-logs").json()
+    assert sum(a["operation"] == "firmware.restored" for a in audits) == 1
+    assert client.post("/api/deployments", headers=admin, json=payload).status_code == 201
+    assert client.post("/api/firmware/999999/restore", headers=admin).status_code == 404
+
+
+@pytest.mark.parametrize("role, expected", [("viewer", 403), ("operator", 200)])
+def test_firmware_restore_requires_writer(client, admin, release, role, expected):
+    url = f"/api/firmware/{release['artifact']['id']}"
+    assert client.delete(url, headers=admin).status_code == 204
+    assert (
+        client.post(
+            "/api/users",
+            headers=admin,
+            json={"username": "limited", "password": PASSWORD, "role": role},
+        ).status_code
+        == 201
+    )
+    login = client.post("/api/auth/login", json={"username": "limited", "password": PASSWORD})
+    headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+    assert client.post(url + "/restore", headers=headers).status_code == expected
+    assert client.get(url).json()["available"] is (expected == 200)
+
+
+def test_duplicate_target_points_to_existing_record_and_respects_tenant(client, admin, device):
+    payload = {"controller_id": "test-target", "name": "Duplicate"}
+    duplicate = client.post("/api/targets", headers=admin, json=payload)
+    assert duplicate.status_code == 409
+    assert "Manage the existing target" in duplicate.json()["detail"]
+    assert client.delete(f"/api/targets/{device['id']}", headers=admin).status_code == 204
+    duplicate = client.post("/api/targets", headers=admin, json=payload)
+    assert duplicate.status_code == 409
+    assert "Show deleted targets" in duplicate.json()["detail"]
+    assert "Restore" in duplicate.json()["detail"]
+    assert (
+        client.post("/api/targets", headers=admin, json={**payload, "tenant": "OTHER"}).status_code
+        == 201
+    )
+
+
 def test_assignment_metadata_download_feedback_and_terminal_protection(
     client, admin, release, device, app
 ):
@@ -672,6 +734,104 @@ def test_cannot_delete_target_with_active_action(client, admin, release, device,
     assert client.get(f"/api/targets/{device['id']}").json()["deleted_at"] is None
     assert client.get(device["path"], headers=device["headers"]).status_code == 200
     assert client.get(f"/api/deployments/{action['id']}").json()["active"] is True
+
+
+def test_permanent_target_deletion_removes_history_and_frees_controller_id(
+    client, admin, release, device, app
+):
+    from app.database.models import Target, TargetAttribute, TargetCredential
+
+    first = client.post("/api/deployments", headers=admin, json=assignment(device, release)).json()
+    client.post(
+        device["path"] + f"/deploymentBase/{first['id']}/feedback",
+        headers=device["headers"],
+        json=feedback(first["id"], "closed", "failure"),
+    )
+    retry = client.post(
+        f"/api/deployments/{first['id']}/retry",
+        headers=admin,
+        json={
+            "request_key": uuid.uuid4().hex,
+            "operator_confirmed": True,
+            "approval_note": "Retry on test hardware only",
+        },
+    )
+    assert retry.status_code == 201, retry.text
+    second = retry.json()
+    client.post(
+        device["path"] + f"/deploymentBase/{second['id']}/feedback",
+        headers=device["headers"],
+        json=feedback(second["id"], "closed", "success"),
+    )
+    client.put(
+        device["path"] + "/configData",
+        headers=device["headers"],
+        json={"data": {"model": "T1"}},
+    )
+    url = f"/api/targets/{device['id']}"
+    payload = {"controller_id_confirmation": "test-target"}
+    assert (
+        client.request("DELETE", url + "/permanent", headers=admin, json=payload).status_code == 409
+    )
+    assert client.delete(url, headers=admin).status_code == 204
+    assert (
+        client.request(
+            "DELETE",
+            url + "/permanent",
+            headers=admin,
+            json={"controller_id_confirmation": "wrong"},
+        ).status_code
+        == 400
+    )
+    assert client.request("DELETE", url + "/permanent", json=payload).status_code == 403
+    assert (
+        client.request("DELETE", url + "/permanent", headers=admin, json=payload).status_code == 204
+    )
+    assert client.get("/api/targets?include_deleted=true").json() == []
+    assert client.get("/api/deployments").json() == []
+    assert client.get(f"/api/deployments/{first['id']}/events").status_code == 404
+    assert client.post(url + "/restore", headers=admin).status_code == 404
+    assert client.get(f"/api/firmware/{release['artifact']['id']}").status_code == 200
+    with app.state.sessions() as session:
+        assert session.get(Target, device["id"]) is None
+        assert session.scalar(select(TargetCredential.id)) is None
+        assert session.scalar(select(TargetAttribute.id)) is None
+        assert session.scalar(select(DeploymentEvent.id)) is None
+    assert any(
+        a["operation"] == "target.permanently_deleted" for a in client.get("/api/audit-logs").json()
+    )
+    assert (
+        client.post(
+            "/api/targets",
+            headers=admin,
+            json={"controller_id": "test-target", "name": "New device"},
+        ).status_code
+        == 201
+    )
+    assert client.get(device["path"], headers=device["headers"]).status_code == 401
+
+
+@pytest.mark.parametrize("role", ["viewer", "operator"])
+def test_permanent_target_deletion_is_admin_only(client, admin, device, role):
+    url = f"/api/targets/{device['id']}"
+    assert client.delete(url, headers=admin).status_code == 204
+    client.post(
+        "/api/users",
+        headers=admin,
+        json={"username": "limited", "password": PASSWORD, "role": role},
+    )
+    login = client.post("/api/auth/login", json={"username": "limited", "password": PASSWORD})
+    headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+    assert (
+        client.request(
+            "DELETE",
+            url + "/permanent",
+            headers=headers,
+            json={"controller_id_confirmation": "test-target"},
+        ).status_code
+        == 403
+    )
+    assert len(client.get("/api/targets?include_deleted=true").json()) == 1
 
 
 def test_delete_preserves_history_and_blocks_new_assignments(client, admin, release, device):

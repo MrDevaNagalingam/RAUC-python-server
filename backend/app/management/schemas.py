@@ -17,6 +17,10 @@ class TargetPatch(BaseModel):
     polling_interval_seconds: int | None = Field(default=None, ge=1, le=86399)
 
 
+class TargetPurge(BaseModel):
+    controller_id_confirmation: str = Field(min_length=1, max_length=128)
+
+
 class FirmwareMetadata(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     version: str = Field(min_length=1, max_length=128)

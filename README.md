@@ -168,6 +168,24 @@ The token file must not already exist. A new target starts as `Never Connected`;
 it becomes `Online` after authenticated updater activity. Creating a target or
 uploading firmware never assigns a deployment.
 
+### Reuse withdrawn firmware or a deleted target
+
+On **Firmware**, click **Restore** beside a withdrawn bundle to make it available
+again with its original metadata. Uploading the same file under another name or
+version is rejected because the server identifies duplicate bundles by checksum.
+Build a new RAUC bundle when the firmware contents or embedded metadata change.
+
+On **Targets**, enable **Show deleted targets** and click **Restore** beside the
+existing controller ID. Then use **Manage** to enable the target and rotate its
+device token; configure the updater with the new token. Deletion retains the target
+identity and history, so creating another target with the same tenant and
+controller ID is blocked. To remove a deleted target completely, click
+**Delete permanently** beside **Restore** and type its controller ID. This removes
+the target, tokens, attributes, deployment history and events, and frees the
+controller ID for reuse. Audit logs and firmware bundles are retained. Only an
+administrator can permanently delete a target. Restoring firmware or a target
+does not deploy firmware.
+
 ## Move existing server data to another PC
 
 Choose this path when you want the old users, target credentials, firmware and
@@ -295,6 +313,7 @@ this feature. No existing targets are deleted by the migration.
 
 ## Documentation
 
+- [Complete application code flow](docs/code-flow.md)
 - [Architecture](docs/architecture.md)
 - [Database schema and migrations](docs/database-schema.md)
 - [DDI compatibility and pinned protocol sources](docs/ddi-compatibility.md)

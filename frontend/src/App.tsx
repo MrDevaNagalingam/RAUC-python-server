@@ -341,11 +341,24 @@ export default function App() {
         case "restore-target":
           await api(`/targets/${dialog.target!.id}/restore`, "POST");
           break;
+        case "purge-target":
+          if (values.controller_id_confirmation !== dialog.target!.controller_id) {
+            throw new Error(
+              "Type the exact controller ID to confirm permanent deletion.",
+            );
+          }
+          await api(`/targets/${dialog.target!.id}/permanent`, "DELETE", {
+            controller_id_confirmation: values.controller_id_confirmation,
+          });
+          break;
         case "firmware":
           await uploadFirmware(form, setUploadProgress);
           break;
         case "withdraw":
           await api(`/firmware/${dialog.artifact!.id}`, "DELETE");
+          break;
+        case "restore-firmware":
+          await api(`/firmware/${dialog.artifact!.id}/restore`, "POST");
           break;
         case "module":
           await api("/software-modules", "POST", {
@@ -400,6 +413,7 @@ export default function App() {
       void refresh();
     } catch (err) {
       setDialogError((err as Error).message);
+      if (dialog.kind === "firmware") setUploadProgress(null);
     } finally {
       setBusy(false);
     }
@@ -1032,6 +1046,16 @@ export default function App() {
                                   Restore
                                 </button>
                               )}
+                              {isAdmin && t.deleted_at && (
+                                <button
+                                  className="danger compact"
+                                  onClick={() =>
+                                    open({ kind: "purge-target", target: t })
+                                  }
+                                >
+                                  Delete permanently
+                                </button>
+                              )}
                               {canWrite && !t.deleted_at && (
                                 <button
                                   className="secondary compact"
@@ -1130,6 +1154,16 @@ export default function App() {
                                   }
                                 >
                                   Withdraw
+                                </button>
+                              )}
+                              {canWrite && !a.available && (
+                                <button
+                                  className="secondary compact"
+                                  onClick={() =>
+                                    open({ kind: "restore-firmware", artifact: a })
+                                  }
+                                >
+                                  Restore
                                 </button>
                               )}
                             </td>
@@ -1430,9 +1464,11 @@ export default function App() {
               revoke: "Revoke device token",
               "delete-target": "Delete target",
               "restore-target": "Restore target",
+              "purge-target": "Delete target permanently",
               token: "Device credential created",
               firmware: "Upload firmware",
               withdraw: "Withdraw firmware",
+              "restore-firmware": "Restore firmware",
               module: "Create software module",
               release: "Create distribution",
               "edit-release": "Edit distribution",
@@ -1634,6 +1670,30 @@ export default function App() {
                     </p>
                   </>
                 )}
+                {dialog.kind === "purge-target" && (
+                  <>
+                    <p>
+                      Permanently delete <strong>{dialog.target!.name}</strong> ·{" "}
+                      <code>
+                        {dialog.target!.tenant}/{dialog.target!.controller_id}
+                      </code>?
+                    </p>
+                    <div className="warning">
+                      This cannot be undone. The target, its device tokens,
+                      attributes, deployment history and deployment events will
+                      be removed. Audit logs and firmware bundles are retained.
+                      You can then create a new target with the same controller ID.
+                    </div>
+                    <Field label="Type the controller ID to confirm permanent deletion">
+                      <input
+                        name="controller_id_confirmation"
+                        required
+                        autoComplete="off"
+                        placeholder={dialog.target!.controller_id}
+                      />
+                    </Field>
+                  </>
+                )}
                 {dialog.kind === "firmware" && (
                   <>
                     <Field
@@ -1693,6 +1753,21 @@ export default function App() {
                     <p>
                       Active deployments block withdrawal. Historical metadata
                       and stored bundle contents are retained.
+                    </p>
+                  </>
+                )}
+                {dialog.kind === "restore-firmware" && (
+                  <>
+                    <p>
+                      Restore{" "}
+                      <strong>
+                        {dialog.artifact!.name} {dialog.artifact!.version}
+                      </strong>{" "}
+                      for new assignments?
+                    </p>
+                    <p>
+                      This reuses the stored bundle and its original metadata.
+                      Restoring does not assign firmware to any target.
                     </p>
                   </>
                 )}
@@ -1963,9 +2038,13 @@ export default function App() {
                 </button>
                 <button
                   className={
-                    ["deployment", "retry", "revoke", "delete-target"].includes(
-                      dialog.kind,
-                    )
+                    [
+                      "deployment",
+                      "retry",
+                      "revoke",
+                      "delete-target",
+                      "purge-target",
+                    ].includes(dialog.kind)
                       ? "danger"
                       : "primary"
                   }
@@ -1973,15 +2052,17 @@ export default function App() {
                 >
                   {busy
                     ? "Saving…"
-                    : dialog.kind === "deployment"
-                      ? "Confirm assignment"
-                      : dialog.kind === "delete-target"
-                        ? "Delete target"
-                        : dialog.kind === "firmware"
-                          ? "Upload bundle"
-                          : dialog.kind === "retry"
-                            ? "Confirm retry"
-                            : "Confirm"}
+                    : dialog.kind === "purge-target"
+                      ? "Delete permanently"
+                      : dialog.kind === "deployment"
+                        ? "Confirm assignment"
+                        : dialog.kind === "delete-target"
+                          ? "Delete target"
+                          : dialog.kind === "firmware"
+                            ? "Upload bundle"
+                            : dialog.kind === "retry"
+                              ? "Confirm retry"
+                              : "Confirm"}
                 </button>
               </div>
             </form>
